@@ -32,6 +32,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - None currently
 
+## [2.2.0] - 2024-12-19 - Performance & UX Improvements Release
+
+### Added
+- **Filter debouncing system** with 500ms delay to prevent UI blocking during typing
+- **Chunked processing** for large files (>1000 lines) with 10ms delays between chunks
+- **Immediate case sensitivity refiltering** when toggling case sensitivity checkbox
+- **Unlimited filter highlighting** - removed artificial 100/1000 match limits
+- **Enhanced filter manager** with improved change detection for all parameters
+- **Future tasks roadmap** with comprehensive development planning document
+
+### Changed
+- **Filter highlighting algorithm** - replaced `text.search()` with `str.find()` for unlimited matches
+- **Case sensitivity handling** - now triggers immediate refiltering without debounce delay
+- **Large file processing** - asynchronous chunked processing prevents UI freezing
+- **Filter manager logic** - returns `True` when any parameter changes (text, mode, case sensitivity)
+- **Startup behavior** - disabled automatic loading of last file on startup
+- **Build number** - incremented to 20 for this release
+
+### Fixed
+- **UI blocking issue** - typing in filter field no longer hangs on large files
+- **Highlighting limitations** - all filter matches are now highlighted regardless of count
+- **Case sensitivity bug** - clicking case sensitivity checkbox now immediately updates results
+- **Filter update detection** - case sensitivity and mode changes now properly trigger refiltering
+- **Performance issues** - large file filtering is now smooth and responsive
+
+### Technical Improvements
+- **Debounced filtering** - prevents excessive processing during rapid typing
+- **Chunked processing** - processes large files in manageable 1000-line chunks
+- **Improved search algorithm** - more reliable and unlimited text searching
+- **Better change detection** - enhanced filter manager parameter change detection
+- **Memory efficiency** - optimized processing for large files without memory bloat
+
+### User Experience
+- **Responsive filtering** - smooth typing experience even on very large files
+- **Immediate feedback** - case sensitivity changes apply instantly
+- **Complete highlighting** - all matching text is highlighted, not just first 100/1000
+- **Better performance** - no more UI freezing during filter operations
+- **Cleaner startup** - application starts without automatically loading files
+
 ## [2.1.0] - 2024-01-XX - Theme Expansion Release
 
 ### Added
@@ -164,6 +203,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Status | Major Features |
 |---------|------|--------|----------------|
+| **2.2.0** | 2024-12-19 | ✅ Released | Performance improvements, UX enhancements, filter fixes |
+| **2.1.0** | 2024-01-XX | ✅ Released | Theme expansion, enhanced highlighting system |
 | **2.0.0** | 2024-01-XX | ✅ Released | Complete modular restructuring, enhanced features |
 | **1.0.0** | 2024-01-XX | ✅ Released | Full feature set, production ready |
 | **0.9.0** | 2024-01-XX | 🔄 Beta | Core functionality, testing phase |

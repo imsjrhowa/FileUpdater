@@ -8,10 +8,10 @@ including default values, configuration keys, and application settings.
 
 # Application metadata
 APP_NAME = "Log Viewer"
-APP_VERSION = "v0.3"
+APP_VERSION = "v1.0"
 APP_DESCRIPTION = "Real-time log file monitor with advanced filtering"
 APP_AUTHOR = "Log Viewer Team"
-BUILD_NUMBER = 17
+BUILD_NUMBER = 21
 
 # Application defaults
 
@@ -32,7 +32,9 @@ LINE_NUMBER_WIDTH = 8              # Width of line numbers panel
 # Filter constants
 DEFAULT_FILTER_MODE = "contains"
 MAX_FILTER_HISTORY = 20
-FILTER_DEBOUNCE_MS = 150
+FILTER_DEBOUNCE_MS = 500  # Increased from 150ms to 500ms for better typing experience
+FILTER_CHUNK_SIZE = 1000  # Process lines in chunks to avoid UI blocking
+FILTER_CHUNK_DELAY_MS = 10  # Delay between chunks to keep UI responsive
 
 # Theme constants
 # All available themes - using single icon for all

@@ -19,8 +19,8 @@ from src.managers import ThemeManager, FilterManager, ConfigManager, FileManager
 from src.utils.constants import (
     APP_NAME, APP_VERSION, APP_DESCRIPTION, APP_AUTHOR,
     DEFAULT_REFRESH_MS, DEFAULT_ENCODING, DEFAULT_THEME,
-    FILTER_DEBOUNCE_MS, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT,
-    LINE_NUMBER_WIDTH, BUILD_NUMBER
+    FILTER_DEBOUNCE_MS, FILTER_CHUNK_SIZE, FILTER_CHUNK_DELAY_MS,
+    MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT, LINE_NUMBER_WIDTH, BUILD_NUMBER
 )
 from .dialogs import SettingsDialog, FileLoadingDialog
 
@@ -96,6 +96,12 @@ class LogViewerApp(tk.Tk):
         self.case_sensitive = tk.BooleanVar(value=False)
         self.filter_mode = tk.StringVar(value="contains")
         self._filter_job = None  # Debounce handle for filter updates
+        
+        # Chunked processing variables
+        self._filtering_in_progress = False
+        self._filter_chunk_job = None
+        self._filter_chunk_index = 0
+        self._filter_matching_lines = []
 
         # Data storage for efficient filtering and display
         self._line_buffer = collections.deque()  # Raw lines storage - no size limit
@@ -125,11 +131,12 @@ class LogViewerApp(tk.Tk):
         self.after(100, self._force_theme_refresh)
         
         # Check if we should open the last file from configuration
-        if not self.path:  # Only if no file was passed via command line
-            last_file_path = self.config_manager.get('file.last_file_path', '')
-            if last_file_path and os.path.exists(last_file_path):
-                self.path = last_file_path
-                self._set_status(f"Opening last file: {os.path.basename(last_file_path)}")
+        # DISABLED: No longer automatically load last file on startup
+        # if not self.path:  # Only if no file was passed via command line
+        #     last_file_path = self.config_manager.get('file.last_file_path', '')
+        #     if last_file_path and os.path.exists(last_file_path):
+        #         self.path = last_file_path
+        #         self._set_status(f"Opening last file: {os.path.basename(last_file_path)}")
         
         # Open file if specified and start monitoring
         if self.path:
@@ -295,7 +302,7 @@ class LogViewerApp(tk.Tk):
 
         self.case_sensitive_cb = ttk.Checkbutton(filter_controls_frame, text="Case",
                                                 variable=self.case_sensitive,
-                                                command=self._on_filter_change)
+                                                command=self._on_case_sensitivity_change)
         self.case_sensitive_cb.pack(side=tk.LEFT)
 
         self.clear_filter_btn = ttk.Button(filter_controls_frame, text="✕", width=3,
@@ -312,7 +319,7 @@ class LogViewerApp(tk.Tk):
         # Bind filter events for real-time updates
         self.filter_text.trace_add('write', lambda *args: self._on_filter_change())
         self.filter_mode_combo.bind('<<ComboboxSelected>>', self._on_filter_mode_change)
-        self.case_sensitive.trace_add('write', lambda *args: self._on_filter_change())
+        # Case sensitivity is handled by _on_case_sensitivity_change() method
         
         # Set initial filter mode
         self.filter_mode_combo.set(self.filter_manager.get_mode_display_names()[0])
@@ -913,6 +920,9 @@ class LogViewerApp(tk.Tk):
         Updates the filter manager with new settings and triggers a
         debounced view rebuild to avoid excessive updates during typing.
         """
+        # Cancel any ongoing filtering operation
+        self._cancel_filtering()
+        
         # Update filter manager with current UI state
         mode_index = self.filter_mode_combo.current()
         mode_name = self.filter_manager.get_mode_names()[mode_index]
@@ -930,6 +940,17 @@ class LogViewerApp(tk.Tk):
             # Clear old highlighting when filter changes
             self._clear_highlighting()
             
+            # If there's no filter text, clear immediately
+            if not filter_text:
+                self._clear_highlighting()
+                self._restore_original_view()
+                return
+            
+            # Show filtering status for large files
+            total_lines = len(self._line_buffer)
+            if total_lines > FILTER_CHUNK_SIZE:
+                self._set_status(f"Filtering {total_lines:,} lines...")
+            
             # Debounce rapid typing; rebuild shortly after user stops
             if self._filter_job is not None:
                 try:
@@ -937,13 +958,47 @@ class LogViewerApp(tk.Tk):
                 except Exception:
                     pass
             self._filter_job = self.after(FILTER_DEBOUNCE_MS, self._rebuild_view)
+    
+    def _on_case_sensitivity_change(self):
+        """
+        Handle case sensitivity changes with immediate refiltering.
+        
+        Unlike text changes, case sensitivity changes should trigger
+        immediate refiltering since they're deliberate user actions.
+        """
+        # Cancel any ongoing filtering operation
+        self._cancel_filtering()
+        
+        # Update filter manager with current UI state
+        mode_index = self.filter_mode_combo.current()
+        mode_name = self.filter_manager.get_mode_names()[mode_index]
+        
+        filter_text = self.filter_text.get()
+        
+        if self.filter_manager.set_filter(
+            filter_text, 
+            mode_name, 
+            self.case_sensitive.get()
+        ):
+            # Update filter status indicator
+            self._update_filter_status()
             
-            # If there's no filter text, clear highlighting immediately
+            # Clear old highlighting when case sensitivity changes
+            self._clear_highlighting()
+            
+            # If there's no filter text, clear immediately
             if not filter_text:
                 self._clear_highlighting()
-            else:
-                # For immediate feedback, apply highlighting to current content
-                self.after(50, self._refresh_highlighting)
+                self._restore_original_view()
+                return
+            
+            # Show filtering status for large files
+            total_lines = len(self._line_buffer)
+            if total_lines > FILTER_CHUNK_SIZE:
+                self._set_status(f"Refiltering {total_lines:,} lines...")
+            
+            # Immediate refiltering for case sensitivity changes
+            self._rebuild_view()
     
     def _update_filter_status(self):
         """
@@ -959,6 +1014,34 @@ class LogViewerApp(tk.Tk):
                 self.filter_status_label.config(text="❌ Error", foreground="red")
         else:
             self.filter_status_label.config(text="", foreground="black")
+    
+    def _cancel_filtering(self):
+        """
+        Cancel any ongoing filtering operation.
+        
+        Cancels both the debounce timer and any chunked processing
+        to allow immediate response to new filter changes.
+        """
+        # Cancel debounce timer
+        if self._filter_job is not None:
+            try:
+                self.after_cancel(self._filter_job)
+            except Exception:
+                pass
+            self._filter_job = None
+        
+        # Cancel chunked processing
+        if self._filter_chunk_job is not None:
+            try:
+                self.after_cancel(self._filter_chunk_job)
+            except Exception:
+                pass
+            self._filter_chunk_job = None
+        
+        # Reset filtering state
+        self._filtering_in_progress = False
+        self._filter_chunk_index = 0
+        self._filter_matching_lines = []
     
     def _on_filter_mode_change(self, event=None):
         """
@@ -1017,9 +1100,7 @@ class LogViewerApp(tk.Tk):
         """
         Re-render the text widget from the buffered lines using the current filter.
         
-        This method efficiently rebuilds the display by applying the current
-        filter to all stored lines, maintaining original line numbers for
-        accurate reference.
+        Uses chunked processing for large files to prevent UI blocking.
         """
         try:
             # If no active filter, restore original view
@@ -1027,56 +1108,164 @@ class LogViewerApp(tk.Tk):
                 self._restore_original_view()
                 return
             
-            # Ensure text widget is in normal state for editing
-            self.text.config(state=tk.NORMAL)
-            
-            # Clear current display
-            self.text.delete('1.0', tk.END)
-            at_end = True
-            matched_count = 0
             total_count = len(self._line_buffer)
             
-            # Store filtered lines with their original line numbers
-            self._filtered_lines = []
+            # For small files, use the original synchronous method
+            if total_count <= FILTER_CHUNK_SIZE:
+                self._rebuild_view_sync()
+                return
             
-            # First, collect all matching lines
-            matching_lines = []
-            for i, line in enumerate(self._line_buffer, 1):
-                if self.filter_manager.matches(line):
-                    matching_lines.append((i, line))
-                    matched_count += 1
-            
-            # Then insert all matching lines at once
-            for i, line in matching_lines:
-                self.text.insert(tk.END, line)
-                self._filtered_lines.append((i, line))
-            
-            # Now apply highlighting to the complete filtered content
-            if matching_lines:
-                self._highlight_all_filter_matches()
-                
-            # Force update to ensure highlighting is applied
-            self.text.update_idletasks()
-            
-            # Ensure highlighting is applied even if the above didn't work
-            if matching_lines:
-                self.after(100, self._refresh_highlighting)
-            
-            # Auto-scroll if configured and we were at the end
-            if self.autoscroll.get() and at_end:
-                self.text.see(tk.END)
-            
-            # Update status with filter information
-            if self.filter_manager.last_error:
-                self._set_status(f"Filter error: {self.filter_manager.last_error}")
-            else:
-                self._set_status(f"Filtered: {matched_count}/{total_count} lines")
-            
-            # Update line numbers after rebuilding view
-            self._update_line_numbers()
+            # For large files, use chunked processing
+            self._rebuild_view_chunked()
                 
         except Exception as e:
             self._set_status("Filter error: {}".format(e))
+    
+    def _rebuild_view_sync(self):
+        """
+        Synchronous rebuild for small files (original implementation).
+        """
+        # Ensure text widget is in normal state for editing
+        self.text.config(state=tk.NORMAL)
+        
+        # Clear current display
+        self.text.delete('1.0', tk.END)
+        at_end = True
+        matched_count = 0
+        total_count = len(self._line_buffer)
+        
+        # Store filtered lines with their original line numbers
+        self._filtered_lines = []
+        
+        # First, collect all matching lines
+        matching_lines = []
+        for i, line in enumerate(self._line_buffer, 1):
+            if self.filter_manager.matches(line):
+                matching_lines.append((i, line))
+                matched_count += 1
+        
+        # Then insert all matching lines at once
+        for i, line in matching_lines:
+            self.text.insert(tk.END, line)
+            self._filtered_lines.append((i, line))
+        
+        # Now apply highlighting to the complete filtered content
+        if matching_lines:
+            # Force update to ensure text is fully inserted
+            self.text.update_idletasks()
+            # Apply highlighting
+            self._highlight_all_filter_matches()
+            # Schedule a refresh to ensure highlighting is visible
+            self.after(50, self._refresh_highlighting)
+        
+        # Auto-scroll if configured and we were at the end
+        if self.autoscroll.get() and at_end:
+            self.text.see(tk.END)
+        
+        # Update status with filter information
+        if self.filter_manager.last_error:
+            self._set_status(f"Filter error: {self.filter_manager.last_error}")
+        else:
+            self._set_status(f"Filtered: {matched_count}/{total_count} lines")
+        
+        # Update line numbers after rebuilding view
+        self._update_line_numbers()
+    
+    def _rebuild_view_chunked(self):
+        """
+        Chunked rebuild for large files to prevent UI blocking.
+        """
+        # Initialize chunked processing
+        self._filtering_in_progress = True
+        self._filter_chunk_index = 0
+        self._filter_matching_lines = []
+        
+        # Clear current display
+        self.text.config(state=tk.NORMAL)
+        self.text.delete('1.0', tk.END)
+        
+        # Start processing first chunk
+        self._process_filter_chunk()
+    
+    def _process_filter_chunk(self):
+        """
+        Process a chunk of lines for filtering.
+        
+        This method is called repeatedly to process the file in chunks,
+        keeping the UI responsive during filtering of large files.
+        """
+        if not self._filtering_in_progress:
+            return
+        
+        total_count = len(self._line_buffer)
+        start_idx = self._filter_chunk_index * FILTER_CHUNK_SIZE
+        end_idx = min(start_idx + FILTER_CHUNK_SIZE, total_count)
+        
+        # Process this chunk
+        for i in range(start_idx, end_idx):
+            line = self._line_buffer[i]
+            if self.filter_manager.matches(line):
+                self._filter_matching_lines.append((i + 1, line))
+        
+        # Update progress
+        self._filter_chunk_index += 1
+        processed = min(end_idx, total_count)
+        
+        # Update status with progress
+        if self.filter_manager.last_error:
+            self._set_status(f"Filter error: {self.filter_manager.last_error}")
+            self._filtering_in_progress = False
+            return
+        else:
+            self._set_status(f"Filtering... {processed:,}/{total_count:,} lines")
+        
+        # Check if we're done
+        if end_idx >= total_count:
+            # All chunks processed, now display results
+            self._display_filtered_results()
+        else:
+            # Schedule next chunk
+            self._filter_chunk_job = self.after(FILTER_CHUNK_DELAY_MS, self._process_filter_chunk)
+    
+    def _display_filtered_results(self):
+        """
+        Display the filtered results after chunked processing is complete.
+        """
+        try:
+            # Insert all matching lines
+            self._filtered_lines = []
+            for i, line in self._filter_matching_lines:
+                self.text.insert(tk.END, line)
+                self._filtered_lines.append((i, line))
+            
+            # Apply highlighting with a small delay to ensure text widget is fully updated
+            if self._filter_matching_lines:
+                # Force update to ensure text is fully inserted
+                self.text.update_idletasks()
+                # Apply highlighting
+                self._highlight_all_filter_matches()
+                # Schedule a refresh to ensure highlighting is visible
+                self.after(50, self._refresh_highlighting)
+            
+            # Auto-scroll if configured
+            if self.autoscroll.get():
+                self.text.see(tk.END)
+            
+            # Update status
+            matched_count = len(self._filter_matching_lines)
+            total_count = len(self._line_buffer)
+            self._set_status(f"Filtered: {matched_count:,}/{total_count:,} lines")
+            
+            # Update line numbers
+            self._update_line_numbers()
+            
+        except Exception as e:
+            self._set_status(f"Display error: {e}")
+        finally:
+            # Reset filtering state
+            self._filtering_in_progress = False
+            self._filter_chunk_index = 0
+            self._filter_matching_lines = []
     
     def _restore_original_view(self):
         """
@@ -1223,29 +1412,40 @@ class LogViewerApp(tk.Tk):
         if not filter_text:
             return
         
-        # Use the text widget's search to find all occurrences
-        search_start = "1.0"
+        # Use Python string search instead of text widget search for better reliability
+        if case_sensitive:
+            search_text = displayed_text
+            search_term = filter_text
+        else:
+            search_text = displayed_text.lower()
+            search_term = filter_text.lower()
+        
         tag_index = 0
+        start_pos = 0
         
         while True:
-            # Search for the filter text in the entire text widget
-            found_pos = self.text.search(filter_text, search_start, "end", nocase=not case_sensitive)
-            if not found_pos:
+            # Find the next occurrence using Python string search
+            found_pos = search_text.find(search_term, start_pos)
+            if found_pos == -1:
                 break
-                
-            # Calculate end position
-            found_end = self.text.index(f"{found_pos}+{len(filter_text)}c")
+            
+            # Convert character position to text widget position
+            # Count newlines to get line number
+            lines_before = search_text[:found_pos].count('\n')
+            chars_in_line = found_pos - search_text.rfind('\n', 0, found_pos) - 1
+            
+            # Convert to text widget coordinates
+            text_pos = f"{lines_before + 1}.{chars_in_line}"
+            text_end = f"{lines_before + 1}.{chars_in_line + len(filter_text)}"
             
             # Apply highlighting tag
-            self.text.tag_add('filter_highlight', found_pos, found_end)
+            self.text.tag_add('filter_highlight', text_pos, text_end)
             
-            # Move to next position to avoid infinite loop
-            search_start = self.text.index(f"{found_pos}+1c")
+            # Move to next position
+            start_pos = found_pos + 1
             tag_index += 1
             
-            # Safety break to avoid infinite loops
-            if tag_index > 100:
-                break
+            # No debug output needed - highlighting works correctly now
     
     def _highlight_starts_with_matches_in_text(self, displayed_text, filter_text, case_sensitive):
         """Highlight lines that start with the filter text."""
@@ -1372,13 +1572,11 @@ class LogViewerApp(tk.Tk):
             tag_name = f'filter_highlight_{(tag_index % 5) + 1}'
             self.text.tag_add(tag_name, found_pos, found_end)
             
-            # Move to next position to avoid infinite loop
-            search_start = self.text.index(f"{found_end}+1c")
+            # Move to the end of the found match to avoid infinite loops
+            search_start = found_end
             tag_index += 1
             
-            # Safety break to avoid infinite loops
-            if tag_index > 100:
-                break
+            # No safety break needed - the search will naturally terminate when no more matches are found
     
     def _highlight_starts_with_matches(self, start_pos, end_pos, line_content, filter_text, case_sensitive):
         """Highlight the beginning of the line if it starts with the filter text."""

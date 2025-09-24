@@ -52,19 +52,27 @@ class FilterManager:
             case_sensitive: Case sensitivity flag (None to keep current)
             
         Returns:
-            True if filter changed, False if no change
+            True if any filter parameter changed, False if no change
         """
-        if mode is not None:
+        changed = False
+        
+        if mode is not None and mode != self.current_mode:
             self.current_mode = mode
-        if case_sensitive is not None:
+            changed = True
+            
+        if case_sensitive is not None and case_sensitive != self.case_sensitive:
             self.case_sensitive = case_sensitive
+            changed = True
             
         if text != self.current_filter:
             self.current_filter = text
             self._add_to_history(text)
+            changed = True
+            
+        if changed:
             self._compile_regex()
-            return True
-        return False
+            
+        return changed
     
     def _add_to_history(self, text: str):
         """
